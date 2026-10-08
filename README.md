@@ -200,4 +200,4 @@ pid after left-click   : 23204          ← 还在
 
 ## 许可
 
-[MIT](LICENSE)。发布前请把 LICENSE 里的 `LunaBatteryTray contributors` 换成你的名字或 ID。
+[MIT](LICENSE)。
