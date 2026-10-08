@@ -15,9 +15,11 @@ jobs:
         shell: cmd
         run: build.cmd
 
-      - name: Upload LunaBatteryTray.exe
+      - name: Upload executables
         uses: actions/upload-artifact@v4
         with:
           name: LunaBatteryTray
-          path: LunaBatteryTray.exe
+          path: |
+            LunaBatteryTray.exe
+            LunaBatteryTray.Watchdog.exe
           if-no-files-found: error

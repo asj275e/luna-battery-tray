@@ -14,7 +14,10 @@ Single executable, no dependencies, no vendor driver required.
   <20% red, **charging blue** (with a small bolt on larger icon sizes)
 - Tooltip: `LUNA TYPE33: 32% (charging)`
 - Device found but the radio link is down → purple `?`; not plugged in → grey `--`
-- Right-click menu: refresh now / start with Windows / refresh interval / about / quit
+- **Pauses itself while game anti-cheat is running** — anti-cheat treats a process that keeps
+  opening a mouse HID device as a macro tool and kills it
+- Optional **watchdog scheduled task**: brings the tray back within 5 minutes if it disappears
+- Right-click menu: refresh now / start with Windows / refresh interval / pause polling / about / quit
 
 ## Quick start
 
@@ -22,6 +25,8 @@ Single executable, no dependencies, no vendor driver required.
 2. Double-click it — the icon appears in the notification area
    (if Windows hides it in the `^` overflow, drag it out)
 3. To start with Windows, tick **开机自启** in the menu, or run `tools\启用开机自启.cmd`
+4. To have it come back automatically after being killed, run `tools\安装守护任务.cmd`
+   (see "Anti-cheat pause and watchdog" below)
 
 ## Build
 
@@ -31,14 +36,21 @@ Requires .NET Framework 4.x, which ships with Windows — no Visual Studio neede
 build.cmd
 ```
 
-which is just:
+which builds both executables:
 
 ```cmd
 %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /optimize+ ^
   /out:LunaBatteryTray.exe ^
   /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll ^
-  src\LunaBatteryTray.cs
+  src\LunaBatteryTray.cs src\AppLog.cs src\AntiCheat.cs
+
+%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /optimize+ ^
+  /out:LunaBatteryTray.Watchdog.exe ^
+  /r:System.dll ^
+  src\Watchdog.cs src\AppLog.cs src\AntiCheat.cs
 ```
+
+> Exit the tray app (menu → 退出) before rebuilding, or the linker cannot overwrite the exe.
 
 ## CLI
 
@@ -50,8 +62,53 @@ LunaBatteryTray.exe --disable-autostart         disable it
 LunaBatteryTray.exe --render-icon out.png       dump the current icon as PNG (16/24/32/64)
 ```
 
-Logs go to `%LOCALAPPDATA%\LunaBatteryTray\state.log`, falling back to `<exe dir>\logs\`
-and then `%TEMP%\LunaBatteryTray\`. `--probe` also writes `probe.txt` next to the log.
+Logs go to `%LOCALAPPDATA%\LunaBatteryTray\`, falling back to `<exe dir>\logs\` and then
+`%TEMP%\LunaBatteryTray\`. The tray writes `state.log`, the watchdog writes `watchdog.log`,
+and `--probe` writes `probe.txt`.
+
+The watchdog has its own switches:
+
+```
+LunaBatteryTray.Watchdog.exe                    run one check (this is what the task runs)
+LunaBatteryTray.Watchdog.exe --install          register the 5-minute watchdog task
+LunaBatteryTray.Watchdog.exe --uninstall        remove it
+LunaBatteryTray.Watchdog.exe --status           show whether it is registered
+LunaBatteryTray.Watchdog.exe --detect           diagnostics: visible processes, detected anti-cheat
+```
+
+## Anti-cheat pause and watchdog (v1.2)
+
+**Why:** the tool opens the mouse's vendor HID channel every few tens of seconds. To game
+anti-cheat that looks exactly like a macro/assist tool, and Tencent ACE does kill such
+processes — observed here, where the app died in the same 30-second window in which ACE
+loaded its kernel filter drivers, with no crash record anywhere.
+
+**A. Anti-cheat aware pause.** Before every refresh the app looks for known anti-cheat
+processes (Tencent ACE/SGuard, EasyAntiCheat, BattlEye, Riot Vanguard, nProtect, XignCode,
+NetEase NeacSafe, …). While one is running the app stops touching the mouse entirely: the
+icon turns into a dark pause badge and the tooltip says so. It resumes by itself once the
+game exits.
+
+* `ACE-Tray.exe` is deliberately **not** on the list: it stays resident after the game, so
+  including it would keep the tool paused forever.
+* Extend the list by dropping an `anticheat.txt` next to the exe (one process name per line,
+  `#` comments, trailing `*` for a prefix match) — see `anticheat.example.txt`.
+* Detection is best-effort, so there is also a manual **pause polling** item in the menu. The
+  state lives in `manual-pause.flag` and survives restarts.
+
+**B. Watchdog scheduled task.** `tools\安装守护任务.cmd` registers a task named
+`LunaBatteryTray Watchdog` that runs every 5 minutes:
+
+| situation | action |
+|---|---|
+| tray already running | nothing |
+| tray gone, no anti-cheat | **starts the tray** |
+| tray gone, anti-cheat running | skipped (it would only be killed again) |
+| you quit it from the menu | skipped (`user-quit.flag`; starting it by hand clears the flag) |
+
+Remove it with `tools\移除守护任务.cmd` or `LunaBatteryTray.Watchdog.exe --uninstall`.
+
+> If install reports access denied, right-click `安装守护任务.cmd` → **Run as administrator**.
 
 ## How the battery level is read
 
@@ -144,6 +201,17 @@ area and never under the pointer:
 menu shown at (1231,892) size 256x148   pointer (1475,1061)   pointerInsideMenu=False
 pid after left-click   : 23204          <- still running
 ```
+
+**v1.2 — anti-cheat pause and watchdog**
+
+The app had been "mysteriously" ending twice, for two different reasons: once killed by
+Tencent ACE when a protected game started (no crash record at all, while the system loaded
+`ACE-CORE202706` in the same minute), and once by a click landing on "Quit" right after the
+menu opened (the v1.1 bug). Every exit path is now logged
+(`menu closed: …`, `menu item: …`, `ApplicationExit fired`, `ProcessExit fired`,
+`UnhandledException`), so a vanished icon is immediately explainable: a deliberate quit, the
+message loop ending, or the process being killed outright — which leaves nothing behind, and
+that absence is itself the answer.
 
 **v1.0** — first release: reverse-engineered the 65-byte feature protocol and cross-checked
 it against the vendor's own web driver.

@@ -91,11 +91,14 @@ namespace LunaBatteryTray
         public bool Charging;
         public string ProductName = "";
         public int BatterySourcePid;
+        public bool Paused;             // anti-cheat is running: no HID polling on purpose
+        public string PausedBy = "";
 
         public string LevelText
         {
             get
             {
+                if (Paused) return "";
                 if (!DevicePresent) return "--";
                 if (Battery < 0) return "?";
                 return Battery.ToString(CultureInfo.InvariantCulture);
@@ -106,6 +109,7 @@ namespace LunaBatteryTray
         {
             get
             {
+                if (Paused) return "反作弊运行中，已暂停" + (PausedBy.Length > 0 ? "（" + PausedBy + "）" : "");
                 if (!DevicePresent) return "未检测到";
                 if (Battery < 0) return "无线未连接";
                 if (Charging) return Battery + "% 充电中";
@@ -291,7 +295,11 @@ namespace LunaBatteryTray
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
                 Color background = Color.FromArgb(0x4A, 0x4A, 0x4A);
-                if (reading.DevicePresent)
+                if (reading.Paused)
+                {
+                    background = Color.FromArgb(0x3E, 0x4C, 0x59);
+                }
+                else if (reading.DevicePresent)
                 {
                     if (reading.Battery < 0) background = Color.FromArgb(0x7A, 0x6A, 0xB0);
                     else if (reading.Charging) background = Color.FromArgb(0x1F, 0x7A, 0xE0);
@@ -304,6 +312,12 @@ namespace LunaBatteryTray
                 using (GraphicsPath path = RoundedRect(new RectangleF(0, 0, size, size), radius))
                 using (SolidBrush fill = new SolidBrush(background))
                     g.FillPath(fill, path);
+
+                if (reading.Paused)
+                {
+                    DrawPauseBars(g, size);
+                    return bmp;
+                }
 
                 string text = reading.LevelText;
                 float fontSize;
@@ -334,6 +348,28 @@ namespace LunaBatteryTray
                 if (withBolt) DrawBolt(g, size);
             }
             return bmp;
+        }
+
+        private static void DrawPauseBars(Graphics g, int size)
+        {
+            float barW = Math.Max(2f, size * 0.16f);
+            float barH = size * 0.50f;
+            float gap = size * 0.14f;
+            float left = size * 0.5f - gap * 0.5f - barW;
+            float top = size * 0.5f - barH * 0.5f;
+
+            using (SolidBrush bar = new SolidBrush(Color.White))
+            {
+                RectangleF a = new RectangleF(left, top, barW, barH);
+                RectangleF b = new RectangleF(left + barW + gap, top, barW, barH);
+                float r = barW * 0.4f;
+                using (GraphicsPath pa = RoundedRect(a, r))
+                using (GraphicsPath pb = RoundedRect(b, r))
+                {
+                    g.FillPath(bar, pa);
+                    g.FillPath(bar, pb);
+                }
+            }
         }
 
         private static void DrawBolt(Graphics g, int size)
@@ -401,8 +437,13 @@ namespace LunaBatteryTray
         private readonly ToolStripMenuItem _header;
         private readonly ToolStripMenuItem _autoStart;
         private readonly ToolStripMenuItem _refresh;
+        private const string QuitFlagFile = "user-quit.flag";
+        private const string PauseFlagFile = "manual-pause.flag";
+        private ToolStripMenuItem _pauseToggle;
+        private bool _manualPause;
         private MouseReading _reading = new MouseReading();
         private int _intervalSeconds = 30;
+        private bool _paused;
 
         public TrayContext(int intervalSeconds)
         {
@@ -457,6 +498,23 @@ namespace LunaBatteryTray
             }
             menu.Items.Add(intervalMenu);
 
+            // Manual fallback for the anti-cheat pause: detection is best effort, so the user can
+            // always stop the polling themselves before launching a protected game.
+            _manualPause = AppLog.Exists(PauseFlagFile);
+            _pauseToggle = new ToolStripMenuItem("暂停查询（玩游戏时）");
+            _pauseToggle.CheckOnClick = false;
+            _pauseToggle.Checked = _manualPause;
+            _pauseToggle.Click += delegate
+            {
+                bool nowPaused = !AppLog.Exists(PauseFlagFile);
+                if (nowPaused) AppLog.Create(PauseFlagFile, "paused manually at " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine);
+                else AppLog.Remove(PauseFlagFile);
+                _pauseToggle.Checked = nowPaused;
+                Log("manual pause -> " + (nowPaused ? "on" : "off"));
+                RefreshNow();
+            };
+            menu.Items.Add(_pauseToggle);
+
             menu.Items.Add(new ToolStripSeparator());
             ToolStripMenuItem about = new ToolStripMenuItem("关于 / 设备信息");
             about.Click += delegate { Log("menu item: 关于"); ShowAbout(); };
@@ -464,7 +522,11 @@ namespace LunaBatteryTray
             ToolStripMenuItem quit = new ToolStripMenuItem("退出");
             quit.Click += delegate
             {
-                Log("menu item: 退出 -> ExitThread");
+                // A deliberate quit must survive the watchdog: leave a marker so it does not
+                // helpfully start the app again five minutes later. Starting the app by hand
+                // (or at logon) clears the marker again.
+                AppLog.Create(QuitFlagFile, "quit from the tray menu at " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + Environment.NewLine);
+                Log("menu item: 退出 -> ExitThread (user-quit marker written)");
                 ExitThread();
             };
             menu.Items.Add(quit);
@@ -478,6 +540,9 @@ namespace LunaBatteryTray
             _icon.MouseDoubleClick += delegate { RefreshNow(); };
             _icon.Text = "LUNA TYPE33 电量";
             _menu = menu;
+
+            // this instance is wanted: let the watchdog resume its job
+            AppLog.Remove(QuitFlagFile);
 
             _autoStart.Checked = IsAutoStartEnabled();
 
@@ -528,6 +593,42 @@ namespace LunaBatteryTray
 
         private void RefreshNow()
         {
+            // The pause flag is re-read every tick rather than cached: the menu writes it, but a
+            // user (or a script) deleting the file is then picked up within one interval too.
+            bool manualPause = AppLog.Exists(PauseFlagFile);
+            if (manualPause != _manualPause)
+            {
+                _manualPause = manualPause;
+                if (_pauseToggle != null) _pauseToggle.Checked = manualPause;
+            }
+
+            // While a kernel anti-cheat is running, do not touch the mouse at all. A process that
+            // periodically opens a mouse HID device looks like a macro tool to anti-cheat and gets
+            // killed - which is exactly what happened with Tencent ACE on this machine.
+            string antiCheat = AntiCheat.ActiveName();
+            if (antiCheat != null || _manualPause)
+            {
+                MouseReading paused = new MouseReading();
+                paused.Paused = true;
+                paused.PausedBy = antiCheat != null ? antiCheat : "手动";
+                if (!_paused)
+                {
+                    _paused = true;
+                    Log(antiCheat != null
+                        ? "anti-cheat detected (" + antiCheat + ") - HID polling paused"
+                        : "manually paused - HID polling stopped");
+                }
+                _reading = paused;
+                UpdateTray();
+                return;
+            }
+
+            if (_paused)
+            {
+                _paused = false;
+                Log("HID polling resumed");
+            }
+
             try
             {
                 _reading = LunaHid.Read();
@@ -563,7 +664,8 @@ namespace LunaBatteryTray
             }
 
             string tooltip;
-            if (!r.DevicePresent) tooltip = "LUNA TYPE33：未检测到";
+            if (r.Paused) tooltip = r.PausedBy == "手动" ? "LUNA TYPE33：已手动暂停查询" : "LUNA TYPE33：反作弊运行中，已暂停";
+            else if (!r.DevicePresent) tooltip = "LUNA TYPE33：未检测到";
             else if (r.Battery < 0) tooltip = "LUNA TYPE33：无线未连接";
             else if (r.Charging) tooltip = "LUNA TYPE33：电量 " + r.Battery + "%（充电中）";
             else tooltip = "LUNA TYPE33：电量 " + r.Battery + "%";
@@ -571,7 +673,9 @@ namespace LunaBatteryTray
             _icon.Text = tooltip;
 
             _header.Text = tooltip;
-            Log("state: " + tooltip + (r.BatterySourcePid != 0 ? " [PID 0x" + r.BatterySourcePid.ToString("X4") + "]" : ""));
+            // the paused state is logged once when it starts, not on every tick
+            if (!r.Paused)
+                Log("state: " + tooltip + (r.BatterySourcePid != 0 ? " [PID 0x" + r.BatterySourcePid.ToString("X4") + "]" : ""));
         }
 
         private void ShowAbout()
@@ -636,58 +740,20 @@ namespace LunaBatteryTray
             base.Dispose(disposing);
         }
 
-        // ---- logging ----
-        private static string _logDirectory;
-
-        /// <summary>First writable of: %LOCALAPPDATA%\LunaBatteryTray, &lt;exe&gt;\logs, %TEMP%\LunaBatteryTray.</summary>
+        // ---- logging (shared implementation, also used by the watchdog) ----
         public static string LogDirectory
         {
-            get
-            {
-                if (_logDirectory != null) return _logDirectory;
-
-                List<string> candidates = new List<string>();
-                candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LunaBatteryTray"));
-                try
-                {
-                    string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
-                    if (!string.IsNullOrEmpty(exeDir)) candidates.Add(Path.Combine(exeDir, "logs"));
-                }
-                catch { }
-                candidates.Add(Path.Combine(Path.GetTempPath(), "LunaBatteryTray"));
-
-                foreach (string dir in candidates)
-                {
-                    try
-                    {
-                        Directory.CreateDirectory(dir);
-                        string probe = Path.Combine(dir, ".write-test");
-                        File.WriteAllText(probe, "ok");
-                        File.Delete(probe);
-                        _logDirectory = dir;
-                        return dir;
-                    }
-                    catch { }
-                }
-                return candidates[candidates.Count - 1];
-            }
+            get { return AppLog.LogDirectory; }
         }
 
         public static string LogPath
         {
-            get { return Path.Combine(LogDirectory, "state.log"); }
+            get { return AppLog.PathIn("state.log"); }
         }
 
         public static void Log(string message)
         {
-            try
-            {
-                string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + message + Environment.NewLine;
-                FileInfo info = new FileInfo(LogPath);
-                if (info.Exists && info.Length > 262144) File.Delete(LogPath);
-                File.AppendAllText(LogPath, line, Encoding.UTF8);
-            }
-            catch { }
+            AppLog.Log(message);
         }
     }
 
@@ -771,6 +837,17 @@ namespace LunaBatteryTray
 
                 if (renderPath != null)
                 {
+                    // render what the tray would actually show right now, pause state included
+                    MouseReading shown = reading;
+                    string acName = AntiCheat.ActiveName();
+                    if (acName != null || AppLog.Exists("manual-pause.flag"))
+                    {
+                        shown = new MouseReading();
+                        shown.Paused = true;
+                        shown.PausedBy = acName != null ? acName : "手动";
+                        Console.WriteLine("showing the paused icon (" + shown.PausedBy + ")");
+                    }
+
                     string stem = renderPath;
                     string ext = Path.GetExtension(renderPath);
                     if (!string.IsNullOrEmpty(ext)) stem = renderPath.Substring(0, renderPath.Length - ext.Length);
@@ -778,7 +855,7 @@ namespace LunaBatteryTray
                     foreach (int px in sizes)
                     {
                         string file = stem + "-" + px + ".png";
-                        using (Bitmap bmp = IconPainter.Render(reading, px))
+                        using (Bitmap bmp = IconPainter.Render(shown, px))
                             bmp.Save(file, System.Drawing.Imaging.ImageFormat.Png);
                         Console.WriteLine("icon written to " + file);
                     }

@@ -1,0 +1,16 @@
+# Extra anti-cheat process names for LunaBatteryTray, one per line.
+# Blank lines and lines starting with '#' are ignored. A trailing '*' matches any suffix.
+# The program also has this list built in:
+#
+#   SGuard64, SGuardSvc64, SGuardUpdate64, SGuard, ACE-Service64, ACE-BOOT,
+#   EasyAntiCheat, EasyAntiCheat_EOS, EasyAntiCheat_EOS_Setup,
+#   BEService, BEService_x64, BEService_lite, BEClient_x64,
+#   vgc, vgtray, GameMon, GameMon64, XignCode, xhunter1,
+#   NeacSafe, NeacSafe64, NeacService
+#
+# NOTE: do not add ACE-Tray.exe here. Tencent's ACE keeps that tray process running long
+# after the game exits, so listing it would leave the tool paused forever.
+#
+# Examples:
+# MyGameGuard*
+# SomeNewAntiCheat
