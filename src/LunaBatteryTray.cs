@@ -411,6 +411,12 @@ namespace LunaBatteryTray
 
             ContextMenuStrip menu = new ContextMenuStrip();
             menu.ShowImageMargin = false;
+            // Records how the menu went away (ItemClicked / clicked away / Esc). This is the clue
+            // that tells a deliberate Quit apart from the app being ended from the outside.
+            menu.Closed += delegate(object sender, ToolStripDropDownClosedEventArgs e)
+            {
+                Log("menu closed: " + e.CloseReason);
+            };
 
             _header = new ToolStripMenuItem("读取中…");
             _header.Enabled = false;
@@ -418,12 +424,12 @@ namespace LunaBatteryTray
             menu.Items.Add(new ToolStripSeparator());
 
             _refresh = new ToolStripMenuItem("立即刷新");
-            _refresh.Click += delegate { RefreshNow(); };
+            _refresh.Click += delegate { Log("menu item: 立即刷新"); RefreshNow(); };
             menu.Items.Add(_refresh);
 
             _autoStart = new ToolStripMenuItem("开机自启");
             _autoStart.CheckOnClick = false;
-            _autoStart.Click += delegate { ToggleAutoStart(); };
+            _autoStart.Click += delegate { Log("menu item: 开机自启"); ToggleAutoStart(); };
             menu.Items.Add(_autoStart);
 
             ToolStripMenuItem intervalMenu = new ToolStripMenuItem("刷新间隔");
@@ -437,6 +443,7 @@ namespace LunaBatteryTray
                 ToolStripMenuItem captured = item;
                 captured.Click += delegate
                 {
+                    Log("menu item: 刷新间隔 " + value + " 秒");
                     _intervalSeconds = value;
                     foreach (ToolStripItem entry in intervalMenu.DropDownItems)
                     {
@@ -452,10 +459,14 @@ namespace LunaBatteryTray
 
             menu.Items.Add(new ToolStripSeparator());
             ToolStripMenuItem about = new ToolStripMenuItem("关于 / 设备信息");
-            about.Click += delegate { ShowAbout(); };
+            about.Click += delegate { Log("menu item: 关于"); ShowAbout(); };
             menu.Items.Add(about);
             ToolStripMenuItem quit = new ToolStripMenuItem("退出");
-            quit.Click += delegate { ExitThread(); };
+            quit.Click += delegate
+            {
+                Log("menu item: 退出 -> ExitThread");
+                ExitThread();
+            };
             menu.Items.Add(quit);
 
             _icon = new NotifyIcon();
@@ -786,9 +797,27 @@ namespace LunaBatteryTray
                 {
                     TrayContext.Log("ui exception: " + e.Exception);
                 };
+                // Exit paths worth recording: "the tray icon vanished" is otherwise indistinguishable
+                // between a deliberate Quit, a clean shutdown and the process being killed outright
+                // (a kill leaves no trace at all here, which is itself the diagnosis).
+                AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+                {
+                    TrayContext.Log("UnhandledException: " + e.ExceptionObject);
+                };
+                AppDomain.CurrentDomain.ProcessExit += delegate
+                {
+                    TrayContext.Log("ProcessExit fired (process is ending)");
+                };
+                Application.ApplicationExit += delegate
+                {
+                    TrayContext.Log("ApplicationExit fired (message loop ended)");
+                };
+                TrayContext.Log("started, pid " + System.Diagnostics.Process.GetCurrentProcess().Id
+                    + ", interval " + interval + "s, exe " + Application.ExecutablePath);
                 try
                 {
                     Application.Run(new TrayContext(interval));
+                    TrayContext.Log("Application.Run returned normally");
                 }
                 catch (Exception ex)
                 {
