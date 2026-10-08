@@ -1,0 +1,23 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile with csc
+        shell: cmd
+        run: build.cmd
+
+      - name: Upload LunaBatteryTray.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: LunaBatteryTray
+          path: LunaBatteryTray.exe
+          if-no-files-found: error
